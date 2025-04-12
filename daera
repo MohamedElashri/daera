@@ -1,0 +1,546 @@
+#!/usr/bin/env bash
+
+#  دائرة (Da'era) - Python Circular Dependency Analyzer
+#  Tool to detect circular imports in Python projects
+#
+# Copyright (c) 2025 Mohamed Elashri
+# https://github.com/MohamedElashri/daera
+# 
+# Licensed under MIT License
+
+# -------- Color Definitions --------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+GRAY='\033[0;90m'
+BOLD='\033[1m'
+UNDERLINE='\033[4m'
+RESET='\033[0m'
+
+# -------- Default Settings --------
+VERBOSE=1        # Default verbosity level (0=quiet, 1=normal, 2=verbose, 3=debug)
+PROJECT_DIR=""   # Default project directory (empty = no directory specified)
+REPORT_FILE=""   # Output report file (empty = no file output)
+GRAPH_OUTPUT=""  # Graph output file (empty = no graph generation)
+EXCLUDE_DIRS=""  # Directories to exclude
+EXCLUDE_FILES="" # Files to exclude
+FOUND_CYCLES=0   # Counter for found cycles
+MAX_DEPTH=100    # Maximum recursion depth for dependency resolution
+
+# -------- Function Declarations --------
+
+function show_banner() {
+    if [[ $VERBOSE -ge 1 ]]; then
+        echo -e "${BOLD}${BLUE}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${RESET}"
+        echo -e "${BOLD}${BLUE}┃ (Da'era) - Circular Dependency Analyzer v1.0        ┃${RESET}"
+        echo -e "${BOLD}${BLUE}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${RESET}"
+        echo
+    fi
+}
+
+function show_help() {
+    echo -e "${BOLD}Usage:${RESET}"
+    echo -e "  daera [options] [directory]"
+    echo
+    echo -e "${BOLD}Options:${RESET}"
+    echo -e "  ${GREEN}-h, --help${RESET}            Show this help message and exit"
+    echo -e "  ${GREEN}-v, --verbose${RESET}         Increase verbosity level (can be used multiple times)"
+    echo -e "  ${GREEN}-q, --quiet${RESET}           Quiet mode (no output except errors and results)"
+    echo -e "  ${GREEN}-o, --output FILE${RESET}     Write report to FILE"
+    echo -e "  ${GREEN}-g, --graph FILE${RESET}      Generate dependency graph in DOT format to FILE"
+    echo -e "  ${GREEN}-e, --exclude DIR${RESET}     Exclude directory from analysis (can be used multiple times)"
+    echo -e "  ${GREEN}-f, --exclude-file FILE${RESET} Exclude file from analysis (can be used multiple times)"
+    echo -e "  ${GREEN}-d, --max-depth N${RESET}     Set maximum recursion depth for dependency resolution (default: 100)"
+    echo
+    echo -e "${BOLD}Examples:${RESET}"
+    echo -e "  daera ~/projects/myproject"
+    echo -e "  daera -vv -o report.txt -g deps.dot -e venv -e __pycache__ ."
+    echo
+}
+
+function log_debug() {
+    if [[ $VERBOSE -ge 3 ]]; then
+        echo -e "${GRAY}[DEBUG] $*${RESET}" >&2
+    fi
+}
+
+function log_info() {
+    if [[ $VERBOSE -ge 2 ]]; then
+        echo -e "${CYAN}[INFO] $*${RESET}" >&2
+    fi
+}
+
+function log_status() {
+    if [[ $VERBOSE -ge 1 ]]; then
+        echo -e "${BLUE}[STATUS] $*${RESET}" >&2
+    fi
+}
+
+function log_warning() {
+    if [[ $VERBOSE -ge 1 ]]; then
+        echo -e "${YELLOW}[WARNING] $*${RESET}" >&2
+    fi
+}
+
+function log_error() {
+    echo -e "${RED}[ERROR] $*${RESET}" >&2
+}
+
+function log_success() {
+    if [[ $VERBOSE -ge 1 ]]; then
+        echo -e "${GREEN}[SUCCESS] $*${RESET}" >&2
+    fi
+}
+
+function check_dependencies() {
+    local missing_deps=()
+    
+    # Check for required commands
+    for cmd in find grep awk sed python; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_deps+=("$cmd")
+        fi
+    done
+    
+    # Check for Python version and required modules
+    if command -v python &> /dev/null; then
+        local python_version
+        python_version=$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
+        if [[ -z "$python_version" ]]; then
+            log_error "Unable to determine Python version"
+            exit 1
+        fi
+        
+        log_debug "Found Python version $python_version"
+        
+        # Check for required Python modules
+        local required_modules=("ast" "os" "sys" "re")
+        local missing_modules=()
+        
+        for module in "${required_modules[@]}"; do
+            if ! python -c "import $module" &> /dev/null; then
+                missing_modules+=("$module")
+            fi
+        done
+        
+        if [[ ${#missing_modules[@]} -gt 0 ]]; then
+            log_error "Missing required Python modules: ${missing_modules[*]}"
+            exit 1
+        fi
+    fi
+    
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        log_error "Missing required dependencies: ${missing_deps[*]}"
+        exit 1
+    fi
+}
+
+function find_python_files() {
+    local dir="$1"
+    local exclude_args=()
+    
+    # Build exclude arguments for find command
+    IFS=',' read -ra EXCLUDE_DIRS_ARRAY <<< "$EXCLUDE_DIRS"
+    for exclude_dir in "${EXCLUDE_DIRS_ARRAY[@]}"; do
+        if [[ -n "$exclude_dir" ]]; then
+            exclude_args+=(-path "*/$exclude_dir/*" -o -path "*/$exclude_dir")
+        fi
+    done
+    
+    IFS=',' read -ra EXCLUDE_FILES_ARRAY <<< "$EXCLUDE_FILES"
+    for exclude_file in "${EXCLUDE_FILES_ARRAY[@]}"; do
+        if [[ -n "$exclude_file" ]]; then
+            exclude_args+=(-name "$exclude_file")
+        fi
+    done
+    
+    if [[ ${#exclude_args[@]} -gt 0 ]]; then
+        find "$dir" -type f -name "*.py" -not \( "${exclude_args[@]}" \) | sort
+    else
+        find "$dir" -type f -name "*.py" | sort
+    fi
+}
+
+function extract_imports() {
+    python -c '
+import sys
+import ast
+import os
+import re
+
+def extract_imports_from_file(file_path):
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+        
+        try:
+            tree = ast.parse(content)
+        except SyntaxError as e:
+            print(f"#ERROR# Syntax error in {file_path}: {str(e)}", file=sys.stderr)
+            return []
+            
+        imports = []
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    imports.append(name.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module is not None:
+                    imports.append(node.module)
+        
+        return imports
+    except Exception as e:
+        print(f"#ERROR# Failed to process {file_path}: {str(e)}", file=sys.stderr)
+        return []
+
+if __name__ == "__main__":
+    file_path = sys.argv[1]
+    imports = extract_imports_from_file(file_path)
+    for imp in imports:
+        print(imp)
+' "$1"
+}
+
+function get_module_path() {
+    local module="$1"
+    local project_dir="$2"
+    
+    # Convert dot notation to path
+    local module_path="${module//.//}"
+    
+    # Look for either a file or a directory with __init__.py
+    for ext in ".py" "/__init__.py"; do
+        if [[ -f "${project_dir}/${module_path}${ext}" ]]; then
+            echo "${project_dir}/${module_path}${ext}"
+            return 0
+        fi
+    done
+    
+    # Module not found in project directory
+    log_debug "Module $module not found in project directory"
+    return 1
+}
+
+function normalize_module_name() {
+    local file_path="$1"
+    local project_dir="$2"
+    
+    # Remove project directory prefix and .py extension
+    local rel_path="${file_path#$project_dir/}"
+    rel_path="${rel_path%.py}"
+    
+    # Handle __init__.py files by using the directory name
+    if [[ "$rel_path" == *"__init__" ]]; then
+        rel_path="${rel_path%/__init__}"
+    fi
+    
+    # Convert path to module notation
+    echo "${rel_path//\//.}"
+}
+
+function build_dependency_graph() {
+    local project_dir="$1"
+    local graph_file=$(mktemp)
+    local error_count=0
+    
+    log_status "Building dependency graph..."
+    
+    echo "digraph {" > "$graph_file"
+    echo "  rankdir=LR;" >> "$graph_file"
+    echo "  node [shape=box, style=filled, fillcolor=lightblue];" >> "$graph_file"
+    
+    # First, find all Python files
+    local python_files
+    python_files=$(find_python_files "$project_dir")
+    
+    log_info "Found $(echo "$python_files" | wc -l | tr -d ' ') Python files"
+    
+    # Process each file and build dependency graph
+    while IFS= read -r file; do
+        log_debug "Processing $file"
+        
+        local module_name
+        module_name=$(normalize_module_name "$file" "$project_dir")
+        
+        # Extract imports from the file
+        local imports
+        imports=$(extract_imports "$file")
+        
+        # Check for errors in import extraction
+        if echo "$imports" | grep -q "#ERROR#"; then
+            error_count=$((error_count + 1))
+            log_warning "$(echo "$imports" | grep "#ERROR#" | sed 's/#ERROR# //')"
+            continue
+        fi
+        
+        # Add dependencies to graph
+        while IFS= read -r import_name; do
+            # Skip if import is empty
+            [[ -z "$import_name" ]] && continue
+            
+            # Skip standard library or external modules
+            if get_module_path "$import_name" "$project_dir" > /dev/null; then
+                echo "  \"$module_name\" -> \"$import_name\";" >> "$graph_file"
+                log_debug "Added dependency: $module_name -> $import_name"
+            else
+                log_debug "Skipping external module: $import_name"
+            fi
+        done <<< "$imports"
+        
+    done <<< "$python_files"
+    
+    echo "}" >> "$graph_file"
+    
+    if [[ $error_count -gt 0 ]]; then
+        log_warning "Encountered $error_count errors while building dependency graph"
+    fi
+    
+    echo "$graph_file"
+}
+
+function detect_cycles() {
+    local graph_file="$1"
+    local report_file="$2"
+    local temp_output=$(mktemp)
+    
+    log_status "Detecting circular dependencies..."
+    
+    python -c '
+import sys
+from collections import defaultdict
+
+def read_graph(file_path):
+    graph = defaultdict(list)
+    try:
+        with open(file_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if "->" in line and ";" in line:
+                    parts = line.split("->")
+                    if len(parts) == 2:
+                        source = parts[0].strip().strip('"')
+                        target = parts[1].strip().strip('";')
+                        graph[source].append(target)
+    except Exception as e:
+        print(f"#ERROR# Failed to read graph: {str(e)}", file=sys.stderr)
+        sys.exit(1)
+    return graph
+
+def find_cycles(graph):
+    """Find all cycles in the graph using a DFS-based approach."""
+    visited = set()
+    path = []
+    path_set = set()
+    cycles = []
+    
+    def dfs(node):
+        if node in path_set:
+            # Found a cycle
+            cycle_start = path.index(node)
+            cycle = path[cycle_start:] + [node]
+            cycles.append(cycle)
+            return
+        
+        if node in visited:
+            return
+            
+        visited.add(node)
+        path.append(node)
+        path_set.add(node)
+        
+        for neighbor in graph.get(node, []):
+            dfs(neighbor)
+        
+        path.pop()
+        path_set.remove(node)
+    
+    # Run DFS from each node
+    for node in graph:
+        if node not in visited:
+            dfs(node)
+    
+    return cycles
+
+if __name__ == "__main__":
+    graph_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
+    graph = read_graph(graph_file)
+    cycles = find_cycles(graph)
+    
+    with open(output_file, "w") as f:
+        if not cycles:
+            f.write("No circular dependencies found.\n")
+        else:
+            f.write(f"Found {len(cycles)} circular dependencies:\n\n")
+            for i, cycle in enumerate(cycles, 1):
+                f.write(f"Cycle {i}: {" -> ".join(cycle)}\n")
+    
+    # Print number of cycles for the bash script
+    print(len(cycles))
+' "$graph_file" "$temp_output"
+
+    local cycle_count=$?
+    FOUND_CYCLES=$(cat "$temp_output" | wc -l)
+    
+    cat "$temp_output"
+    
+    # Save to report file if specified
+    if [[ -n "$report_file" ]]; then
+        cp "$temp_output" "$report_file"
+        if [[ $FOUND_CYCLES -gt 0 ]]; then
+            log_info "Report saved to $report_file"
+        fi
+    fi
+    
+    rm -f "$temp_output"
+}
+
+function generate_visual_graph() {
+    local graph_file="$1"
+    local output_file="$2"
+    
+    if ! command -v dot &> /dev/null; then
+        log_warning "GraphViz (dot) command not found. Skipping graph visualization."
+        log_warning "Install GraphViz to generate visual dependency graphs."
+        return 1
+    fi
+    
+    log_status "Generating visual dependency graph at $output_file..."
+    
+    if [[ "$output_file" == *.dot ]]; then
+        cp "$graph_file" "$output_file"
+    elif [[ "$output_file" == *.png ]]; then
+        dot -Tpng "$graph_file" -o "$output_file"
+    elif [[ "$output_file" == *.svg ]]; then
+        dot -Tsvg "$graph_file" -o "$output_file"
+    elif [[ "$output_file" == *.pdf ]]; then
+        dot -Tpdf "$graph_file" -o "$output_file"
+    else
+        log_warning "Unsupported output format. Saving as DOT file."
+        cp "$graph_file" "$output_file"
+    fi
+    
+    if [[ $? -eq 0 ]]; then
+        log_success "Dependency graph saved to $output_file"
+    else
+        log_error "Failed to generate dependency graph"
+        return 1
+    fi
+}
+
+function analyze_project() {
+    local project_dir="$1"
+    
+    # Validate project directory
+    if [[ ! -d "$project_dir" ]]; then
+        log_error "Project directory does not exist or is not a directory: $project_dir"
+        exit 1
+    fi
+    
+    project_dir=$(realpath "$project_dir")
+    log_status "Analyzing project directory: $project_dir"
+    
+    # Build dependency graph
+    local graph_file
+    graph_file=$(build_dependency_graph "$project_dir")
+    
+    # Detect cycles
+    detect_cycles "$graph_file" "$REPORT_FILE"
+    
+    # Generate visual graph if requested
+    if [[ -n "$GRAPH_OUTPUT" ]]; then
+        generate_visual_graph "$graph_file" "$GRAPH_OUTPUT"
+    fi
+    
+    # Clean up
+    rm -f "$graph_file"
+    
+    # Report findings
+    if [[ $FOUND_CYCLES -gt 0 ]]; then
+        log_error "Found $FOUND_CYCLES circular dependencies."
+        return 1
+    else
+        log_success "No circular dependencies found!"
+        return 0
+    fi
+}
+
+# -------- Main Script --------
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -v|--verbose)
+            VERBOSE=$((VERBOSE + 1))
+            shift
+            ;;
+        -vv)
+            VERBOSE=$((VERBOSE + 2))
+            shift
+            ;;
+        -q|--quiet)
+            VERBOSE=0
+            shift
+            ;;
+        -o|--output)
+            REPORT_FILE="$2"
+            shift 2
+            ;;
+        -g|--graph)
+            GRAPH_OUTPUT="$2"
+            shift 2
+            ;;
+        -e|--exclude)
+            if [[ -z "$EXCLUDE_DIRS" ]]; then
+                EXCLUDE_DIRS="$2"
+            else
+                EXCLUDE_DIRS="$EXCLUDE_DIRS,$2"
+            fi
+            shift 2
+            ;;
+        -f|--exclude-file)
+            if [[ -z "$EXCLUDE_FILES" ]]; then
+                EXCLUDE_FILES="$2"
+            else
+                EXCLUDE_FILES="$EXCLUDE_FILES,$2"
+            fi
+            shift 2
+            ;;
+        -d|--max-depth)
+            MAX_DEPTH="$2"
+            shift 2
+            ;;
+        -*)
+            log_error "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+        *)
+            PROJECT_DIR="$1"
+            shift
+            ;;
+    esac
+done
+
+show_banner
+
+# Check if a project directory was specified
+if [[ -z "$PROJECT_DIR" ]]; then
+    show_help
+    exit 0
+fi
+
+check_dependencies
+analyze_project "$PROJECT_DIR"
+exit_code=$?
+
+exit $exit_code
