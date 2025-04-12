@@ -1,4 +1,4 @@
-# دائرة (Da'era) - Python Circular Dependency Analyzer
+#  (Da'era) - Python Circular Dependency Analyzer
 
 Da'era (Arabic for "circle") identifies circular dependencies in Python codebases by building and analyzing the import graph of your project. Circular dependencies occur when modules import each other in a loop, leading to potential issues like import errors, unpredictable initialization order, and tight coupling that makes maintenance difficult.
 
