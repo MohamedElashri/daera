@@ -340,8 +340,7 @@ def generate_report(cycles, locations, output_file):
                         f.write(f"  - {module}: <location not found>\n")
                 f.write("\n")
     
-    # Print number of cycles for bash script
-    print(len(cycles))
+    # Don't print the number of cycles to standard output, we'll handle this with CYCLE_COUNT
 
 def main():
     # Parse arguments
@@ -454,7 +453,8 @@ PYTHON_SCRIPT
     fi
     
     # If we have output from the script and we're not in quiet mode, display it
-    if [[ -n "$python_output" && $VERBOSE -gt 0 ]]; then
+    # But only if there are cycles found or if we're in verbose mode
+    if [[ -n "$python_output" && ($FOUND_CYCLES -gt 0 || $VERBOSE -ge 2) ]]; then
         echo "$python_output"
     fi
     
