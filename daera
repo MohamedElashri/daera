@@ -367,10 +367,22 @@ def main():
     # Process files in parallel
     start_time = time.time()
     
-    # Limit workers to number of files and CPU cores
-    actual_workers = min(max_workers, len(python_files), cpu_count())
+    # FIX: Ensure at least 1 worker is used, even if no Python files are found
+    actual_workers = max(1, min(max_workers, len(python_files), cpu_count()))
     if verbose >= 2:
         print(f"[INFO] Using {actual_workers} parallel workers")
+    
+    # Check if we have any Python files to process
+    if not python_files:
+        if verbose >= 1:
+            print("[INFO] No Python files found in the project directory")
+        # Create empty report if output file was specified
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write("No Python files found in the project directory.\n")
+        # Print 0 cycles for bash script
+        print("CYCLE_COUNT:0")
+        return 0
     
     # Create arguments for each file
     file_args = [(file, project_dir, only_project) for file in python_files]
