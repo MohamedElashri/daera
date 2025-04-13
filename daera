@@ -373,14 +373,14 @@ def main():
     
     # Check if we have any Python files to process
     if not python_files:
-        if verbose >= 1:
-            print("[INFO] No Python files found in the project directory")
+        # Always print this message regardless of verbosity level
+        print("[WARNING] No Python files found in the project directory")
         # Create empty report if output file was specified
         if output_file:
             with open(output_file, 'w') as f:
                 f.write("No Python files found in the project directory.\n")
-        # Print 0 cycles for bash script
-        print("CYCLE_COUNT:0")
+        # Print 0 cycles for bash script with special flag
+        print("CYCLE_COUNT:NOPYTHON")
         return 0
     
     # Create arguments for each file
@@ -444,18 +444,30 @@ PYTHON_SCRIPT
     
     # Extract the cycle count from the last line 
     FOUND_CYCLES=0
+    NO_PYTHON_FILES=0
     cycle_count_line=$(echo "$python_output" | grep "CYCLE_COUNT:" | tail -n 1)
     if [[ -n "$cycle_count_line" ]]; then
-        FOUND_CYCLES=$(echo "$cycle_count_line" | cut -d':' -f2)
+        CYCLE_VALUE=$(echo "$cycle_count_line" | cut -d':' -f2)
+        
+        if [[ "$CYCLE_VALUE" == "NOPYTHON" ]]; then
+            NO_PYTHON_FILES=1
+        else
+            FOUND_CYCLES=$CYCLE_VALUE
+        fi
         
         # Remove the cycle count line from the output
         python_output=$(echo "$python_output" | grep -v "CYCLE_COUNT:")
     fi
     
-    # If we have output from the script and we're not in quiet mode, display it
-    # But only if there are cycles found or if we're in verbose mode
-    if [[ -n "$python_output" && ($FOUND_CYCLES -gt 0 || $VERBOSE -ge 2) ]]; then
-        echo "$python_output"
+    # If we have output from the script, display it based on conditions
+    if [[ -n "$python_output" ]]; then
+        # Always show output for warnings and errors
+        if echo "$python_output" | grep -q "\[WARNING\]\|\[ERROR\]"; then
+            echo "$python_output"
+        # Show detailed output if cycles found or in verbose mode
+        elif [[ $FOUND_CYCLES -gt 0 || $VERBOSE -ge 2 ]]; then
+            echo "$python_output"
+        fi
     fi
     
     # If graph output was requested and exists, process it with GraphViz
@@ -491,7 +503,10 @@ PYTHON_SCRIPT
     rm -f "$py_script"
     
     # Report findings
-    if [[ "$FOUND_CYCLES" -gt 0 ]]; then
+    if [[ "$NO_PYTHON_FILES" -eq 1 ]]; then
+        log_warning "No Python files found in the project directory. This is not a Python project or it contains no Python code."
+        return 0
+    elif [[ "$FOUND_CYCLES" -gt 0 ]]; then
         log_error "Found $FOUND_CYCLES circular dependencies."
         return 1
     else
