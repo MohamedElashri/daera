@@ -130,7 +130,7 @@ File locations:
 If you run the tool on a directory without Python files, you'll see:
 
 ```
-[WARNING] No Python files found in the project directory. This is not a Python project or it contains no Python code.
+[WARNING] No Python files found in the project directory
 ```
 
 ## How It Works
